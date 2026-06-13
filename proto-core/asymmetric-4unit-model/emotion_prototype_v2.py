@@ -23,9 +23,10 @@ class VectorGenesisVoid2D:
             force = np.zeros(2)
         total = force + external_input
         memory = np.tanh(self.residue)
-        self.pos += noise + 0.10 * total + 0.06 * memory
+        # 改善: 外部入力の影響を強化
+        self.pos += noise + 0.22 * total + 0.09 * memory
         self.pos = np.clip(self.pos, -3.8, 3.8)
-        self.residue = 0.87 * self.residue + 0.05 * self.pos
+        self.residue = 0.85 * self.residue + 0.07 * self.pos
         return {"pos": self.pos.copy(), "force": force.copy()}
 
 class VectorGenesisLayerPM:
@@ -76,26 +77,33 @@ class VGE_LayerPlusMinus:
         plus_state = self.layer_plus.step()
         tension = plus_state["avg_dist"]
         assist = 0.0
-        if tension > 0.8:
-            assist = min((tension - 0.8) * 1.8, 0.9)
-        elif tension > 0.4:
-            assist = (tension - 0.4) * 0.6
+        # 改善: アシストの感度を上げる
+        if tension > 0.55:
+            assist = min((tension - 0.55) * 2.0, 0.95)
+        elif tension > 0.3:
+            assist = (tension - 0.3) * 1.0
+        else:
+            assist = max((0.3 - tension) * 0.35, 0)
+
         plus_center = self.layer_plus.get_vector()
         minus_inputs = []
         for v in self.layer_minus.voids:
             diff = v.pos - plus_center
             perp = np.array([-diff[1], diff[0]])
-            fb = -0.15 * diff + 0.28 * perp * (1.0 + assist * 0.6)
+            # 改善: Layer間フィードバックを強化
+            fb = -0.18 * diff + 0.32 * perp * (1.0 + assist * 0.5)
             minus_inputs.append(fb)
         minus_state = self.layer_minus.step(external_inputs=minus_inputs, assist_from_other=assist)
+
         minus_center = self.layer_minus.get_vector()
         plus_feedback = []
         for v in self.layer_plus.voids:
             diff = v.pos - minus_center
-            fb = -0.05 * diff
+            fb = -0.12 * diff
             plus_feedback.append(fb)
         for i, v in enumerate(self.layer_plus.voids):
-            v.pos += 0.03 * plus_feedback[i]
+            v.pos += 0.08 * plus_feedback[i]  # 強化
+
         new_tension = abs(plus_state["avg_dist"] - minus_state["avg_dist"])
         return {
             "plus": plus_state,
@@ -123,25 +131,36 @@ class SafeEmotionVGE:
 
     def inject_over_input(self, strength: float = 1.0, polarity: float = 0.0, input_density: float = 1.0):
         effective_strength = strength * input_density
-        bias_effect = polarity * effective_strength * 0.4
+        bias_effect = polarity * effective_strength * 0.45
         for v in self.vge.layer_plus.voids:
             v.pos += np.array([bias_effect, bias_effect * 0.5]) * effective_strength
         for v in self.vge.layer_minus.voids:
             v.pos += np.array([-bias_effect * 0.7, bias_effect * 0.3]) * effective_strength
 
     def step(self, over_input_strength=0.0, over_input_polarity=0.0):
-        current_tension = self.vge.layer_plus.step()["avg_dist"]
+        # 現在のテンションを取得
+        temp_state = self.vge.layer_plus.step()
+        current_tension = temp_state["avg_dist"]
 
         input_density = 1.0
         rapid_cooling_applied = False
 
-        if current_tension > 0.8:
-            input_density = 0.3
+        # === 安全設計 ===
+        if current_tension > 0.65:          # 改善: 実際的な値に下げる
+            # 急速冷却（冷水ぶっかける）
+            input_density = 0.25
             rapid_cooling_applied = True
-            self.tension_maintenance_cost += 3.5
-        elif current_tension > 0.5:
+            self.tension_maintenance_cost += 4.0
+
+            # 実際に冷却する（residueを減衰）
+            for v in self.vge.layer_plus.voids:
+                v.residue *= 0.45
+            for v in self.vge.layer_minus.voids:
+                v.residue *= 0.45
+
+        elif current_tension > 0.42:      # 改善: 予防カットの閾値を下げる
             input_density = 0.5
-            self.tension_maintenance_cost += 1.2
+            self.tension_maintenance_cost += 1.5
 
         if over_input_strength > 0:
             self.inject_over_input(over_input_strength, over_input_polarity, input_density)
@@ -154,7 +173,7 @@ class SafeEmotionVGE:
         assist = state["assist"]
 
         emotion_balance = (plus_dist - minus_dist) / max(plus_dist + minus_dist, 0.01)
-        emotion_balance = np.clip(emotion_balance + self.emotional_bias * 0.3, -1.0, 1.0)
+        emotion_balance = np.clip(emotion_balance + self.emotional_bias * 0.55, -1.0, 1.0)
 
         text = self._generate_emotional_text(emotion_balance, tension, assist, rapid_cooling_applied)
 
@@ -175,21 +194,21 @@ class SafeEmotionVGE:
     def _generate_emotional_text(self, balance, tension, assist, rapid_cooling):
         if rapid_cooling:
             base = "急に冷やされて、情緒が少し引き締められた感じ"
-        elif tension > 1.2:
-            if assist > 0.3:
+        elif tension > 1.0:
+            if assist > 0.25:
                 base = "熱がこみ上げてくるけど、どこかで冷静に整えられているような"
             else:
                 base = "激しく情緒が揺さぶられて、言葉が溢れそうになる"
-        elif tension > 0.7:
+        elif tension > 0.6:
             base = "情緒が少し揺れて、複雑な気持ちが混ざっている"
         else:
             base = "穏やかで、情緒が静かに流れている"
 
-        if balance > 0.4:
+        if balance > 0.35:
             mood = "明るく前向きで、希望や喜びが感じられる"
-        elif balance > 0.1:
+        elif balance > 0.05:
             mood = "穏やかながらも少し期待が膨らんでいる"
-        elif balance < -0.4:
+        elif balance < -0.35:
             mood = "少し重く、慎重で内省的な響きがある"
         else:
             mood = "中間的で、さまざまな情緒が混ざり合っている"
@@ -198,22 +217,22 @@ class SafeEmotionVGE:
 
     def run_demo(self, steps=30):
         print("=== VGE4 情緒プロトタイプ v2（安全設計版） ===\n")
-        print("・テンション > 0.5 → 入力50%カット（予防）")
-        print("・テンション > 0.8 → 急速冷却 + コスト加算\n")
+        print("・テンション > 0.42 → 入力50%カット（予防）")
+        print("・テンション > 0.65 → 急速冷却 + コスト加算\n")
 
         for t in range(steps):
             if t < 8:
                 self.set_desired_tension(0.4)
-                over_str, over_pol = 0.4, 0.7
+                over_str, over_pol = 0.5, 0.7
             elif t < 15:
-                self.set_desired_tension(1.3)
-                over_str, over_pol = 1.5, 0.9
+                self.set_desired_tension(1.4)
+                over_str, over_pol = 1.6, 0.85
             elif t < 22:
-                self.set_desired_tension(0.95)
-                over_str, over_pol = 0.9, -0.6
+                self.set_desired_tension(1.0)
+                over_str, over_pol = 1.0, -0.5
             else:
-                self.set_desired_tension(0.6)
-                over_str, over_pol = 0.5, 0.2
+                self.set_desired_tension(0.65)
+                over_str, over_pol = 0.6, 0.3
 
             state = self.step(over_input_strength=over_str, over_input_polarity=over_pol)
 
@@ -225,7 +244,7 @@ class SafeEmotionVGE:
 
         print("=== デモ終了 ===")
         print(f"最終テンション维持コスト: {self.tension_maintenance_cost:.1f}")
-        print("安全設計により、高テンション時に自動で入力制限＋急速冷却が工いている。")
+        print("安全設計が機能しているか確認できる状態に改善しました。")
 
 
 if __name__ == "__main__":
